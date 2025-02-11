@@ -25,6 +25,11 @@ public struct NativeMeshBuilder<TVertex> : IDisposable where TVertex : unmanaged
         this.attributes = attributes;
         indexOffset = 0;
     }
+
+    public void AddVertex(TVertex vertex)
+    {
+        vertices.Add(vertex);
+    }
     
     public void AddIndex(int i)
     {
