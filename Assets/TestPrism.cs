@@ -72,15 +72,21 @@ public class TestPrism : MonoBehaviour
         meshBuilder.ToMeshData(ref meshData);
         Mesh.ApplyAndDisposeWritableMeshData(meshDataArray, mesh);
 
+        // Calculate bounds for proper culling
+        mesh.RecalculateBounds();
+
         // Clean up
         meshBuilder.Dispose();
         attributes.Dispose();
 
         meshFilter.sharedMesh = mesh;
-        
-        // Store the mesh data for debug visualization
-        vertices = mesh.vertices;
-        normals = mesh.normals;
+
+        // Store the mesh data for debug visualization (only if enabled)
+        if (showNormals)
+        {
+            vertices = mesh.vertices;
+            normals = mesh.normals;
+        }
     }
     
     private void OnDrawGizmos()
@@ -273,7 +279,7 @@ public class TestPrism : MonoBehaviour
             Height = height
         }.Schedule(sideCount * 2, 32);
         
-        // Build vertices in parallel
+        // Build vertices in parallel - all can run simultaneously after circle calculation
         var buildTopCapJob = new BuildCapVerticesJob
         {
             CirclePositions = circlePositions,
@@ -283,7 +289,7 @@ public class TestPrism : MonoBehaviour
             BottomCapStartIndex = topCapVertexCount,
             IsTop = true
         }.Schedule(sideCount, 32, calculateCirclePointsJob);
-        
+
         var buildBottomCapJob = new BuildCapVerticesJob
         {
             CirclePositions = circlePositions,
@@ -292,42 +298,47 @@ public class TestPrism : MonoBehaviour
             TopCapStartIndex = 0,
             BottomCapStartIndex = topCapVertexCount,
             IsTop = false
-        }.Schedule(sideCount, 32, buildTopCapJob);
-        
+        }.Schedule(sideCount, 32, calculateCirclePointsJob);
+
         var buildSidesJob = new BuildSideVerticesJob
         {
             CirclePositions = circlePositions,
             OutputVertices = vertices,
             SideCount = sideCount,
             SideVertexBaseIndex = topCapVertexCount + bottomCapVertexCount
-        }.Schedule(sideCount, 32, buildBottomCapJob);
+        }.Schedule(sideCount, 32, calculateCirclePointsJob);
 
-        
+        // Combine all vertex building jobs
+        var allVertexJobs = JobHandle.CombineDependencies(buildTopCapJob, buildBottomCapJob, buildSidesJob);
+
+
+        // Index generation jobs can run in parallel after all vertices are built
         var topCapIndicesJob = new FanTriangulateJob
         {
             OutputIndices = indices,
             OutputOffset = 0,
             StartIndex = 0,
             Reversed = false
-        }.Schedule(sideCount - 2, 32, buildSidesJob);
-        
+        }.Schedule(sideCount - 2, 32, allVertexJobs);
+
         var bottomCapIndicesJob = new FanTriangulateJob
         {
             OutputIndices = indices,
             OutputOffset = topCapTriCount * 3,
             StartIndex = topCapVertexCount,
             Reversed = true
-        }.Schedule(sideCount - 2, 32, topCapIndicesJob);
-        
+        }.Schedule(sideCount - 2, 32, allVertexJobs);
+
         var sideQuadsJob = new TriangulateQuadsJob
         {
             StartIndex = topCapVertexCount + bottomCapVertexCount,
             OutputIndices = indices,
             OutputOffset = (topCapTriCount + bottomCapTriCount) * 3
-        }.Schedule(sideCount, 1, bottomCapIndicesJob);
+        }.Schedule(sideCount, 32, allVertexJobs); // Also increased batch size from 1 to 32
 
-        // Wait for all vertex and index generation to complete
-        sideQuadsJob.Complete();
+        // Wait for all index generation to complete
+        var allIndexJobs = JobHandle.CombineDependencies(topCapIndicesJob, bottomCapIndicesJob, sideQuadsJob);
+        allIndexJobs.Complete();
         
         // Copy vertices
         var meshVertices = meshBuilder.GetVertices();

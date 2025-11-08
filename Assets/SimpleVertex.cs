@@ -11,8 +11,9 @@ public struct SimpleVertex : IEquatable<SimpleVertex>
 
     public bool Equals(SimpleVertex other)
     {
-        return Position.Equals(other.Position) &&
-               Normal.Equals(other.Normal) &&
-               UV.Equals(other.UV);
+        const float epsilon = 0.0001f;
+        return math.distancesq(Position, other.Position) < epsilon &&
+               math.distancesq(Normal, other.Normal) < epsilon &&
+               math.distancesq(UV, other.UV) < epsilon;
     }
 }

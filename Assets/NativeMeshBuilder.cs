@@ -113,21 +113,37 @@ public struct NativeMeshBuilder<TVertex> : IDisposable where TVertex : unmanaged
 
         public void Execute(int triangleIndex)
         {
-            // Find which face this triangle belongs to using binary search
+            int indexPosition = triangleIndex * 3;
+
+            // Binary search to find which face this triangle belongs to
+            int left = 0;
+            int right = FaceOffsets.Length - 1;
             int faceIndex = 0;
-            for (int i = 0; i < FaceOffsets.Length; i++)
+
+            while (left <= right)
             {
-                if (i < FaceOffsets.Length - 1)
+                int mid = (left + right) / 2;
+
+                if (mid < FaceOffsets.Length - 1)
                 {
-                    if (triangleIndex * 3 >= FaceOffsets[i] && triangleIndex * 3 < FaceOffsets[i + 1])
+                    if (indexPosition >= FaceOffsets[mid] && indexPosition < FaceOffsets[mid + 1])
                     {
-                        faceIndex = i;
+                        faceIndex = mid;
                         break;
                     }
+                    else if (indexPosition < FaceOffsets[mid])
+                    {
+                        right = mid - 1;
+                    }
+                    else
+                    {
+                        left = mid + 1;
+                    }
                 }
-                else if (triangleIndex * 3 >= FaceOffsets[i])
+                else
                 {
-                    faceIndex = i;
+                    // Last element
+                    faceIndex = mid;
                     break;
                 }
             }
@@ -138,12 +154,12 @@ public struct NativeMeshBuilder<TVertex> : IDisposable where TVertex : unmanaged
 
             int faceStartIndex = FaceVertexOffsets[faceIndex];
             int localTriIndex = triangleIndex - (FaceOffsets[faceIndex] / 3);
-            
+
             if (localTriIndex >= 0 && localTriIndex < faceSize - 2)
             {
                 int firstVertex = FaceIndices[faceStartIndex];
                 int outputIndex = triangleIndex * 3;
-                
+
                 OutputIndices[outputIndex] = (ushort)(IndexOffset + firstVertex);
                 OutputIndices[outputIndex + 1] = (ushort)(IndexOffset + FaceIndices[faceStartIndex + localTriIndex + 1]);
                 OutputIndices[outputIndex + 2] = (ushort)(IndexOffset + FaceIndices[faceStartIndex + localTriIndex + 2]);
@@ -158,9 +174,14 @@ public struct NativeMeshBuilder<TVertex> : IDisposable where TVertex : unmanaged
 
     public void AddIndex(int i)
     {
-        var index = indices.Length;
-        indices.Resize(indices.Length + 3, NativeArrayOptions.UninitializedMemory);
-        indices[index] = (ushort)(indexOffset + i);
+        indices.Add((ushort)(indexOffset + i));
+    }
+
+    public void AddTriangle(int i0, int i1, int i2)
+    {
+        indices.Add((ushort)(indexOffset + i0));
+        indices.Add((ushort)(indexOffset + i1));
+        indices.Add((ushort)(indexOffset + i2));
     }
 
     public void ToMeshData(ref Mesh.MeshData meshData,
@@ -194,5 +215,7 @@ public struct NativeMeshBuilder<TVertex> : IDisposable where TVertex : unmanaged
     {
         vertices.Dispose();
         indices.Dispose();
+        // Note: attributes are owned by caller and should be disposed by them
+        // If this causes issues, consider documenting ownership or making a copy
     }
 }

@@ -118,18 +118,38 @@ public class TestMeshBuilder : MonoBehaviour
 
         var calculateNormalsJobHandle = calculateNormalsJob.Schedule(6, 32);
 
+        // Build reverse lookup: vertex index -> list of face indices
+        // This eliminates the O(n×m×k) nested loop problem
+        var vertexToFacesMap = new NativeArray<int>(vertexData.Length * 6, Allocator.TempJob); // Max 6 faces per vertex
+        var vertexToFacesCount = new NativeArray<int>(vertexData.Length, Allocator.TempJob);
+
+        var buildVertexToFacesJob = new BuildVertexToFacesMapJob
+        {
+            FaceIndices = faceIndices,
+            FaceSizes = faceSizes,
+            FaceOffsets = faceOffsets,
+            VertexToFacesMap = vertexToFacesMap,
+            VertexToFacesCount = vertexToFacesCount,
+            MaxFacesPerVertex = 6
+        };
+
+        var buildMapHandle = buildVertexToFacesJob.Schedule(calculateNormalsJobHandle);
+
         // After face normals are calculated, accumulate them for each vertex
         var accumulateNormalsJob = new AccumulateNormalsJob
         {
             Vertices = vertexData,
-            FaceIndices = faceIndices,
-            FaceSizes = faceSizes,
-            FaceOffsets = faceOffsets,
-            FaceNormals = faceNormals
+            FaceNormals = faceNormals,
+            VertexToFacesMap = vertexToFacesMap,
+            VertexToFacesCount = vertexToFacesCount,
+            MaxFacesPerVertex = 6
         };
 
-        var accumulateNormalsJobHandle = accumulateNormalsJob.Schedule(vertexData.Length, 32, calculateNormalsJobHandle);
+        var accumulateNormalsJobHandle = accumulateNormalsJob.Schedule(vertexData.Length, 32, buildMapHandle);
         accumulateNormalsJobHandle.Complete();
+
+        vertexToFacesMap.Dispose();
+        vertexToFacesCount.Dispose();
 
         var meshBuilder = new NativeMeshBuilder<SimpleVertex>(
             vertexData,
@@ -145,6 +165,9 @@ public class TestMeshBuilder : MonoBehaviour
         meshBuilder.ToMeshData(ref meshData);
         Mesh.ApplyAndDisposeWritableMeshData(meshDataArray, mesh);
 
+        // Calculate bounds for proper culling
+        mesh.RecalculateBounds();
+
         // Clean up
         meshBuilder.Dispose();
         attributes.Dispose();
@@ -155,10 +178,13 @@ public class TestMeshBuilder : MonoBehaviour
         faceOffsets.Dispose();
 
         meshFilter.sharedMesh = mesh;
-        
-        // Store the mesh data for debug visualization
-        vertices = mesh.vertices;
-        normals = mesh.normals;
+
+        // Store the mesh data for debug visualization (only if enabled)
+        if (showNormals)
+        {
+            vertices = mesh.vertices;
+            normals = mesh.normals;
+        }
     }
     
     private void OnDrawGizmos()
@@ -210,34 +236,64 @@ public class TestMeshBuilder : MonoBehaviour
     }
 
     [BurstCompile]
-    private struct AccumulateNormalsJob : IJobParallelFor
+    private struct BuildVertexToFacesMapJob : IJob
     {
-        [NativeDisableParallelForRestriction]
-        public NativeArray<SimpleVertex> Vertices;
         [ReadOnly] public NativeArray<int> FaceIndices;
         [ReadOnly] public NativeArray<int> FaceSizes;
         [ReadOnly] public NativeArray<int> FaceOffsets;
-        [ReadOnly] public NativeArray<float3> FaceNormals;
-        
-        public void Execute(int vertexIndex)
-        {
-            float3 accumulatedNormal = float3.zero;
+        [WriteOnly] public NativeArray<int> VertexToFacesMap;
+        public NativeArray<int> VertexToFacesCount;
+        public int MaxFacesPerVertex;
 
-            // Look through all faces to find ones that use this vertex
+        public void Execute()
+        {
+            // Initialize counts to zero
+            for (int i = 0; i < VertexToFacesCount.Length; i++)
+            {
+                VertexToFacesCount[i] = 0;
+            }
+
+            // Build the reverse mapping
             for (int faceIndex = 0; faceIndex < FaceSizes.Length; faceIndex++)
             {
                 int faceStartIndex = FaceOffsets[faceIndex];
                 int faceSize = FaceSizes[faceIndex];
-                
-                // Check if this vertex is used in this face
+
                 for (int i = 0; i < faceSize; i++)
                 {
-                    if (FaceIndices[faceStartIndex + i] == vertexIndex)
+                    int vertexIndex = FaceIndices[faceStartIndex + i];
+                    int count = VertexToFacesCount[vertexIndex];
+
+                    if (count < MaxFacesPerVertex)
                     {
-                        accumulatedNormal += FaceNormals[faceIndex];
-                        break;
+                        VertexToFacesMap[vertexIndex * MaxFacesPerVertex + count] = faceIndex;
+                        VertexToFacesCount[vertexIndex] = count + 1;
                     }
                 }
+            }
+        }
+    }
+
+    [BurstCompile]
+    private struct AccumulateNormalsJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction]
+        public NativeArray<SimpleVertex> Vertices;
+        [ReadOnly] public NativeArray<float3> FaceNormals;
+        [ReadOnly] public NativeArray<int> VertexToFacesMap;
+        [ReadOnly] public NativeArray<int> VertexToFacesCount;
+        public int MaxFacesPerVertex;
+
+        public void Execute(int vertexIndex)
+        {
+            float3 accumulatedNormal = float3.zero;
+
+            // Only iterate over faces that actually use this vertex
+            int faceCount = VertexToFacesCount[vertexIndex];
+            for (int i = 0; i < faceCount; i++)
+            {
+                int faceIndex = VertexToFacesMap[vertexIndex * MaxFacesPerVertex + i];
+                accumulatedNormal += FaceNormals[faceIndex];
             }
 
             // Normalize the accumulated normal
